@@ -1,35 +1,42 @@
-// FIXED CONTROLLER with Authentication - Add to LightningController.js
-
 const express = require('express');
 const router = express.Router();
 const Venue = require('../models/Venue');
 const Pass = require('../models/Pass');
 const Transaction = require('../models/Transaction');
+const LightningSauce = require('../core/Lightning-Sauce');
+const stripe = require('../integrations/stripe');
+const twilio = require('../integrations/twilio');
+const QRCode = require('../utils/qrCode');
+const mongoose = require('mongoose');
 const { verifyToken, requireRole, requireVenueOwnership } = require('../middleware/auth');
 
-// PUBLIC ROUTES (no auth required)
+// ==================== PUBLIC ROUTES (No auth required) ====================
 
-// GET all venues (public for customers)
+// GET all venues - REAL DATABASE (with approval filtering)
 router.get('/venues', async (req, res) => {
   try {
     const { approvalStatus, includeAll } = req.query;
     
     let filter = {};
     
-    // Admin can see all venues
+    // For admin panel, include all venues
     if (includeAll === 'true') {
-      // Requires admin auth (should be protected)
-      filter = {};
+      // No filter, return everything
     }
-    // For customers, only show approved and active venues
+    // For customer app, only show approved and active venues
     else {
       filter = { 
         isActive: true,
         $or: [
           { approvalStatus: 'approved' },
-          { approvalStatus: { $exists: false } }
+          { approvalStatus: { $exists: false } } // Legacy venues without approval status
         ]
       };
+    }
+    
+    // Allow filtering by specific approval status
+    if (approvalStatus) {
+      filter.approvalStatus = approvalStatus;
     }
     
     const venues = await Venue.find(filter).lean();
@@ -40,7 +47,7 @@ router.get('/venues', async (req, res) => {
   }
 });
 
-// GET single venue (public)
+// GET single venue - REAL DATABASE
 router.get('/venues/:id', async (req, res) => {
   try {
     const venue = await Venue.findById(req.params.id);
@@ -53,9 +60,9 @@ router.get('/venues/:id', async (req, res) => {
   }
 });
 
-// PROTECTED ROUTES (auth required)
+// ==================== PROTECTED ROUTES (Auth required) ====================
 
-// POST create new venue (requires auth)
+// POST create new venue - REAL DATABASE (REQUIRES AUTH)
 router.post('/venues/create', verifyToken, async (req, res) => {
   try {
     const venueData = req.body;
@@ -68,10 +75,16 @@ router.post('/venues/create', verifyToken, async (req, res) => {
       venueData.approvalStatus = 'pending';
     }
     
+    // Create new venue
     const newVenue = new Venue(venueData);
     await newVenue.save();
     
-    console.log(`✅ New venue created: ${newVenue.name} (Status: ${newVenue.approvalStatus})`);
+    console.log(`✅ New venue created: ${newVenue.name} (Status: ${newVenue.approvalStatus || 'pending'}) by ${req.userEmail}`);
+    
+    // TODO: Send email notification to admin if pending
+    // if (newVenue.approvalStatus === 'pending') {
+    //   await sendPendingNotificationToAdmin(newVenue);
+    // }
     
     res.json({ 
       success: true, 
@@ -87,7 +100,7 @@ router.post('/venues/create', verifyToken, async (req, res) => {
   }
 });
 
-// POST approve/reject venue (ADMIN ONLY)
+// POST approve/reject venue - ADMIN ONLY
 router.post('/venue/approve', verifyToken, requireRole('admin'), async (req, res) => {
   try {
     const { venueId, approvalStatus, rejectionReason } = req.body;
@@ -105,12 +118,21 @@ router.post('/venue/approve', verifyToken, requireRole('admin'), async (req, res
     
     if (approvalStatus === 'approved') {
       venue.approvedAt = new Date();
-      venue.approvedBy = req.userEmail;
+      venue.approvedBy = req.userEmail || 'admin';
+      
       console.log(`✅ Venue APPROVED: ${venue.name} by ${req.userEmail}`);
+      
+      // TODO: Send approval email to venue owner with login credentials
+      // await sendApprovalEmail(venue);
+      
     } else if (approvalStatus === 'rejected') {
       venue.rejectedAt = new Date();
       venue.rejectionReason = rejectionReason || 'Application did not meet requirements';
-      console.log(`❌ Venue REJECTED: ${venue.name}`);
+      
+      console.log(`❌ Venue REJECTED: ${venue.name} by ${req.userEmail}`);
+      
+      // TODO: Send rejection email to venue owner
+      // await sendRejectionEmail(venue);
     }
     
     await venue.save();
@@ -127,7 +149,7 @@ router.post('/venue/approve', verifyToken, requireRole('admin'), async (req, res
   }
 });
 
-// DELETE venue (ADMIN ONLY)
+// DELETE venue - ADMIN ONLY
 router.delete('/venues/:id', verifyToken, requireRole('admin'), async (req, res) => {
   try {
     const venue = await Venue.findById(req.params.id);
@@ -136,7 +158,7 @@ router.delete('/venues/:id', verifyToken, requireRole('admin'), async (req, res)
       return res.status(404).json({ error: 'Venue not found' });
     }
     
-    // Check for active passes
+    // Optional: Check if venue has active passes before deleting
     const activePasses = await Pass.countDocuments({ 
       venueId: req.params.id, 
       status: 'active' 
@@ -144,7 +166,7 @@ router.delete('/venues/:id', verifyToken, requireRole('admin'), async (req, res)
     
     if (activePasses > 0) {
       return res.status(400).json({ 
-        error: `Cannot delete venue with ${activePasses} active passes`,
+        error: `Cannot delete venue with ${activePasses} active passes. Please wait for passes to expire or contact support.`,
         activePasses 
       });
     }
@@ -164,7 +186,224 @@ router.delete('/venues/:id', verifyToken, requireRole('admin'), async (req, res)
   }
 });
 
-// GET validate pass (SCANNER ONLY - requires auth)
+// ==================== FIXED PAYMENT FLOW ====================
+
+// STEP 1: Create payment intent (DON'T create pass yet!)
+router.post('/passes/create-payment', async (req, res) => {
+  try {
+    const { venueId, email, phone, numPasses } = req.body;
+    
+    // Validate input
+    if (!venueId || !email || !phone || !numPasses) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+    
+    if (numPasses < 1 || numPasses > 10) {
+      return res.status(400).json({ error: 'Invalid number of passes (1-10)' });
+    }
+    
+    // Get venue
+    const venue = await Venue.findById(venueId);
+    if (!venue) {
+      return res.status(404).json({ error: 'Venue not found' });
+    }
+    
+    // Check venue is approved and active
+    if (venue.approvalStatus && venue.approvalStatus !== 'approved') {
+      return res.status(400).json({ error: 'Venue is not accepting passes at this time' });
+    }
+    
+    if (!venue.isActive) {
+      return res.status(400).json({ error: 'Venue passes not active' });
+    }
+    
+    // Check availability
+    if (venue.availablePasses < numPasses) {
+      return res.status(400).json({ error: 'Not enough passes available' });
+    }
+    
+    // Calculate amount
+    const amount = venue.currentPrice * numPasses;
+    const amountCents = Math.round(amount * 100);
+    
+    // Create payment intent (but DON'T create pass yet!)
+    const paymentIntent = await stripe.createPaymentIntent(amountCents, email);
+    
+    // Store payment intent metadata for later
+    await stripe.updatePaymentIntent(paymentIntent.id, {
+      metadata: {
+        venueId: venue._id.toString(),
+        venueName: venue.name,
+        email,
+        phone,
+        numPasses: numPasses.toString(),
+        amount: amount.toString()
+      }
+    });
+    
+    console.log(`💳 Payment intent created: ${paymentIntent.id} for ${venue.name}`);
+    
+    res.json({
+      success: true,
+      clientSecret: paymentIntent.client_secret,
+      paymentIntentId: paymentIntent.id
+    });
+    
+  } catch (error) {
+    console.error('Create payment error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// STEP 2: After payment succeeds, create the pass
+router.post('/passes/confirm-payment', async (req, res) => {
+  try {
+    const { paymentIntentId, email, phone } = req.body;
+    
+    if (!paymentIntentId) {
+      return res.status(400).json({ error: 'Payment intent ID required' });
+    }
+    
+    // Retrieve payment intent from Stripe
+    const paymentIntent = await stripe.retrievePaymentIntent(paymentIntentId);
+    
+    // Verify payment succeeded
+    if (paymentIntent.status !== 'succeeded') {
+      return res.status(400).json({ error: 'Payment not completed' });
+    }
+    
+    // Check if pass already created (idempotency)
+    const existingPass = await Pass.findOne({ 
+      stripePaymentIntentId: paymentIntentId 
+    });
+    
+    if (existingPass) {
+      console.log(`✅ Pass already exists: ${existingPass.passId}`);
+      return res.json({
+        success: true,
+        passId: existingPass.passId,
+        pass: existingPass,
+        message: 'Pass already created'
+      });
+    }
+    
+    // Get metadata
+    const { venueId, venueName, numPasses, amount } = paymentIntent.metadata;
+    
+    // Get venue
+    const venue = await Venue.findById(venueId);
+    if (!venue) {
+      return res.status(404).json({ error: 'Venue not found' });
+    }
+    
+    // Generate pass
+    const passId = `LP-${Date.now()}-${Math.random().toString(36).substr(2, 9).toUpperCase()}`;
+    const qrCodeData = await QRCode.generate(passId);
+    
+    // Create pass
+    const newPass = new Pass({
+      passId,
+      venueId: venue._id,
+      venueName: venue.name,
+      email,
+      phone,
+      purchasePrice: venue.currentPrice,
+      quantity: parseInt(numPasses),
+      amount: parseFloat(amount),
+      qrCode: qrCodeData,
+      status: 'active',
+      validUntil: new Date(Date.now() + 24 * 60 * 60 * 1000),
+      stripePaymentIntentId: paymentIntentId
+    });
+    
+    await newPass.save();
+    
+    // Create transaction
+    const transaction = new Transaction({
+      passId,
+      venueId: venue._id,
+      venueName: venue.name,
+      email,
+      phone,
+      amount: parseFloat(amount),
+      venueRevenue: parseFloat(amount) * 0.7,
+      platformFee: parseFloat(amount) * 0.3,
+      stripeChargeId: paymentIntentId,
+      status: 'completed'
+    });
+    
+    await transaction.save();
+    
+    // Update venue
+    venue.availablePasses -= parseInt(numPasses);
+    venue.inLine += parseInt(numPasses);
+    await venue.save();
+    
+    console.log(`✅ Pass created after payment: ${passId} for ${venue.name}`);
+    
+    // Send confirmation SMS
+    try {
+      await twilio.sendPassConfirmation(phone, venue, newPass);
+    } catch (smsError) {
+      console.error('SMS send failed:', smsError);
+      // Don't fail the request if SMS fails
+    }
+    
+    res.json({
+      success: true,
+      passId,
+      pass: newPass
+    });
+    
+  } catch (error) {
+    console.error('Confirm payment error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Stripe Webhook Handler
+router.post('/webhooks/stripe', express.raw({ type: 'application/json' }), async (req, res) => {
+  const sig = req.headers['stripe-signature'];
+  let event;
+
+  try {
+    event = stripe.webhooks.constructEvent(
+      req.body,
+      sig,
+      process.env.STRIPE_WEBHOOK_SECRET
+    );
+  } catch (err) {
+    console.error('⚠️ Webhook signature verification failed:', err.message);
+    return res.status(400).send(`Webhook Error: ${err.message}`);
+  }
+
+  // Handle the event
+  switch (event.type) {
+    case 'payment_intent.succeeded':
+      const paymentIntent = event.data.object;
+      console.log('✅ Payment succeeded:', paymentIntent.id);
+      
+      // Pass is created via confirm-payment endpoint
+      // This is just for logging/monitoring
+      break;
+      
+    case 'payment_intent.payment_failed':
+      const failedPayment = event.data.object;
+      console.log('❌ Payment failed:', failedPayment.id);
+      
+      // Could send notification to customer
+      break;
+      
+    default:
+      console.log(`Unhandled event type ${event.type}`);
+  }
+
+  res.json({ received: true });
+});
+
+// ==================== PASS VALIDATION & USAGE (Scanner Routes) ====================
+
+// GET validate pass - SCANNER ONLY (REQUIRES AUTH)
 router.get('/passes/:passId/validate', verifyToken, requireRole('venue', 'admin', 'scanner'), async (req, res) => {
   try {
     const pass = await Pass.findOne({ passId: req.params.passId });
@@ -190,7 +429,7 @@ router.get('/passes/:passId/validate', verifyToken, requireRole('venue', 'admin'
   }
 });
 
-// POST use pass (SCANNER ONLY - requires auth)
+// POST use pass - SCANNER ONLY (REQUIRES AUTH)
 router.post('/passes/:passId/use', verifyToken, requireRole('venue', 'admin', 'scanner'), async (req, res) => {
   try {
     const pass = await Pass.findOne({ passId: req.params.passId });
@@ -223,12 +462,14 @@ router.post('/passes/:passId/use', verifyToken, requireRole('venue', 'admin', 's
   }
 });
 
-// PUT update venue pricing (VENUE OWNER or ADMIN only)
+// ==================== VENUE MANAGEMENT (Owner Routes) ====================
+
+// PUT update venue pricing - VENUE OWNER or ADMIN (REQUIRES AUTH)
 router.put('/venue/pricing', verifyToken, requireVenueOwnership, async (req, res) => {
   try {
     const { venueId, newPrice } = req.body;
     
-    if (newPrice < 10 || newPrice > 500) {
+    if (!newPrice || newPrice < 10 || newPrice > 500) {
       return res.status(400).json({ error: 'Price must be between $10 and $500' });
     }
     
@@ -248,7 +489,7 @@ router.put('/venue/pricing', verifyToken, requireVenueOwnership, async (req, res
   }
 });
 
-// POST activate passes (VENUE OWNER or ADMIN only)
+// POST activate passes - VENUE OWNER or ADMIN (REQUIRES AUTH)
 router.post('/venue/activate', verifyToken, requireVenueOwnership, async (req, res) => {
   try {
     const { venueId, availablePasses } = req.body;
@@ -274,7 +515,7 @@ router.post('/venue/activate', verifyToken, requireVenueOwnership, async (req, r
   }
 });
 
-// POST deactivate passes (VENUE OWNER or ADMIN only)
+// POST deactivate passes - VENUE OWNER or ADMIN (REQUIRES AUTH)
 router.post('/venue/deactivate', verifyToken, requireVenueOwnership, async (req, res) => {
   try {
     const { venueId } = req.body;
@@ -295,7 +536,7 @@ router.post('/venue/deactivate', verifyToken, requireVenueOwnership, async (req,
   }
 });
 
-// GET venue stats (VENUE OWNER or ADMIN only)
+// GET venue stats - VENUE OWNER or ADMIN (REQUIRES AUTH) - FIXED WITH AGGREGATION
 router.get('/venue/:venueId/stats', verifyToken, requireVenueOwnership, async (req, res) => {
   try {
     const venue = await Venue.findById(req.params.venueId);
@@ -303,7 +544,7 @@ router.get('/venue/:venueId/stats', verifyToken, requireVenueOwnership, async (r
       return res.status(404).json({ error: 'Venue not found' });
     }
     
-    // Get today's transactions using aggregation
+    // Get today's transactions using FIXED aggregation (no more N+1 queries!)
     const startOfDay = new Date();
     startOfDay.setHours(0, 0, 0, 0);
     
@@ -343,6 +584,51 @@ router.get('/venue/:venueId/stats', verifyToken, requireVenueOwnership, async (r
       inLine: venue.inLine
     });
     
+  } catch (error) {
+    console.error('Stats error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST push notification - VENUE OWNER or ADMIN (REQUIRES AUTH)
+router.post('/notifications/push', verifyToken, requireVenueOwnership, async (req, res) => {
+  try {
+    const { venueId, message, radius } = req.body;
+    
+    const venue = await Venue.findById(venueId);
+    if (!venue) {
+      return res.status(404).json({ error: 'Venue not found' });
+    }
+    
+    // TODO: Find users within radius and send notifications
+    
+    res.json({ success: true, sent: 0, message: 'Feature coming soon' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// GET pricing suggestion - PUBLIC OR AUTH (Works either way)
+router.get('/pricing/ml-suggest', async (req, res) => {
+  try {
+    const { venueId } = req.query;
+    
+    if (!venueId) {
+      return res.status(400).json({ error: 'Venue ID required' });
+    }
+    
+    const venue = await Venue.findById(venueId);
+    if (!venue) {
+      return res.status(404).json({ error: 'Venue not found' });
+    }
+    
+    const suggestion = LightningSauce.calculateOptimalPrice(
+      venue,
+      venue.waitTime,
+      venue.capacity
+    );
+    
+    res.json(suggestion);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
