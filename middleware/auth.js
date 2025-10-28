@@ -1,8 +1,7 @@
-// FIXED AUTHENTICATION - middleware/auth.js
-
 const jwt = require('jsonwebtoken');
+const bcrypt = require('bcryptjs');
 
-// Verify JWT token
+// Verify JWT token middleware
 function verifyToken(req, res, next) {
   const authHeader = req.headers['authorization'];
   
@@ -22,12 +21,12 @@ function verifyToken(req, res, next) {
     req.venueId = decoded.venueId;  // For venue owners
     next();
   } catch (error) {
-    console.error('Token verification failed:', error);
+    console.error('Token verification failed:', error.message);
     return res.status(401).json({ error: 'Invalid or expired token' });
   }
 }
 
-// Require specific role
+// Require specific role(s) middleware
 function requireRole(...allowedRoles) {
   return (req, res, next) => {
     if (!req.userRole) {
@@ -46,7 +45,7 @@ function requireRole(...allowedRoles) {
   };
 }
 
-// Require venue ownership
+// Require venue ownership middleware (for venue-specific actions)
 function requireVenueOwnership(req, res, next) {
   const venueId = req.params.venueId || req.body.venueId;
   
@@ -88,6 +87,10 @@ function generateToken(user) {
 async function login(req, res) {
   const { email, password } = req.body;
   
+  if (!email || !password) {
+    return res.status(400).json({ error: 'Email and password required' });
+  }
+  
   try {
     // Find user
     const User = require('../models/User');
@@ -98,7 +101,6 @@ async function login(req, res) {
     }
     
     // Verify password
-    const bcrypt = require('bcryptjs');
     const isValid = await bcrypt.compare(password, user.passwordHash);
     
     if (!isValid) {
@@ -107,6 +109,8 @@ async function login(req, res) {
     
     // Generate token
     const token = generateToken(user);
+    
+    console.log(`✅ User logged in: ${user.email} (${user.role})`);
     
     res.json({
       success: true,
@@ -125,9 +129,18 @@ async function login(req, res) {
   }
 }
 
-// Register endpoint (for venue owners)
+// Register endpoint (for venue owners and admins)
 async function register(req, res) {
   const { email, password, role, venueId } = req.body;
+  
+  if (!email || !password) {
+    return res.status(400).json({ error: 'Email and password required' });
+  }
+  
+  // Password strength check
+  if (password.length < 8) {
+    return res.status(400).json({ error: 'Password must be at least 8 characters' });
+  }
   
   try {
     const User = require('../models/User');
@@ -139,7 +152,6 @@ async function register(req, res) {
     }
     
     // Hash password
-    const bcrypt = require('bcryptjs');
     const passwordHash = await bcrypt.hash(password, 10);
     
     // Create user
@@ -154,6 +166,8 @@ async function register(req, res) {
     
     // Generate token
     const token = generateToken(user);
+    
+    console.log(`✅ User registered: ${user.email} (${user.role})`);
     
     res.json({
       success: true,
