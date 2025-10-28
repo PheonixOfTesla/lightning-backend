@@ -3,6 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const rateLimit = require('express-rate-limit');
 const { connectDB } = require('./config/database');
+const { login, register } = require('./middleware/auth');
 
 const LightningController = require('./controllers/LightningController');
 const ftController = require('./controllers/ftController');
@@ -27,6 +28,11 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
+
+// Stripe webhook needs raw body (before express.json())
+app.use('/api/v1/lightning/webhooks/stripe', express.raw({ type: 'application/json' }));
+
+// JSON body parser for all other routes
 app.use(express.json());
 
 // Rate limiting
@@ -37,7 +43,11 @@ const limiter = rateLimit({
 });
 app.use('/api/', limiter);
 
-// Routes
+// Auth routes (NO rate limit on these, or use separate lighter limit)
+app.post('/api/v1/auth/login', login);
+app.post('/api/v1/auth/register', register);
+
+// Main routes
 app.use('/api/v1/lightning', LightningController);
 app.use('/api/v1/analytics', ftController);
 
@@ -50,9 +60,19 @@ app.get('/', (req, res) => {
     timestamp: new Date(),
     endpoints: {
       health: '/health',
-      venues: '/api/v1/lightning/venues',
-      purchase: '/api/v1/lightning/passes/purchase',
-      analytics: '/api/v1/analytics/system/overview'
+      auth: {
+        login: '/api/v1/auth/login',
+        register: '/api/v1/auth/register'
+      },
+      public: {
+        venues: '/api/v1/lightning/venues',
+        venue: '/api/v1/lightning/venues/:id'
+      },
+      protected: {
+        purchase: '/api/v1/lightning/passes/create-payment',
+        confirm: '/api/v1/lightning/passes/confirm-payment',
+        analytics: '/api/v1/analytics/system/overview'
+      }
     },
     frontend: 'https://lightning-app-gold.vercel.app'
   });
@@ -75,9 +95,12 @@ app.use((req, res, next) => {
     message: `Cannot ${req.method} ${req.path}`,
     availableEndpoints: [
       'GET /health',
+      'POST /api/v1/auth/login',
+      'POST /api/v1/auth/register',
       'GET /api/v1/lightning/venues',
       'GET /api/v1/lightning/venues/:id',
-      'POST /api/v1/lightning/passes/purchase',
+      'POST /api/v1/lightning/passes/create-payment',
+      'POST /api/v1/lightning/passes/confirm-payment',
       'GET /api/v1/lightning/venue/:venueId/stats',
       'PUT /api/v1/lightning/venue/pricing',
       'POST /api/v1/lightning/venue/activate',
@@ -103,4 +126,5 @@ app.listen(PORT, () => {
   console.log(`📍 Frontend: https://lightning-app-gold.vercel.app`);
   console.log(`🔗 Backend: http://localhost:${PORT}`);
   console.log(`🏥 Health: http://localhost:${PORT}/health`);
+  console.log(`🔐 Auth: POST /api/v1/auth/login | POST /api/v1/auth/register`);
 });
