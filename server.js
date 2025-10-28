@@ -107,6 +107,81 @@ app.post('/api/v1/auth/login', login);
 app.post('/api/v1/auth/register', register);
 
 // ========================================
+// FIRST ADMIN CREATION (Disable after use!)
+// ========================================
+app.post('/api/v1/auth/create-first-admin', async (req, res) => {
+  try {
+    const User = require('./models/User');
+    const bcrypt = require('bcryptjs');
+    
+    // Check if admin already exists
+    const existingAdmin = await User.findOne({ role: 'admin' });
+    if (existingAdmin) {
+      return res.status(400).json({ 
+        error: 'Admin already exists',
+        message: 'An admin account has already been created. Use the regular login endpoint.'
+      });
+    }
+    
+    // Optional: Require a secret key for extra security
+    const { email, password, phone, secretKey } = req.body;
+    
+    // Uncomment this if you want to require a secret key:
+    // const ADMIN_SECRET = process.env.ADMIN_CREATION_SECRET || 'change-me-in-production';
+    // if (secretKey !== ADMIN_SECRET) {
+    //   return res.status(403).json({ error: 'Invalid secret key' });
+    // }
+    
+    // Validate input
+    if (!email || !password) {
+      return res.status(400).json({ error: 'Email and password required' });
+    }
+    
+    if (password.length < 8) {
+      return res.status(400).json({ error: 'Password must be at least 8 characters' });
+    }
+    
+    // Check if user already exists
+    const existingUser = await User.findOne({ email: email.toLowerCase() });
+    if (existingUser) {
+      return res.status(400).json({ error: 'Email already registered' });
+    }
+    
+    // Hash password
+    const passwordHash = await bcrypt.hash(password, 10);
+    
+    // Create admin user
+    const admin = new User({
+      email: email.toLowerCase(),
+      phone: phone || '+10000000000',
+      passwordHash,
+      role: 'admin',
+      createdAt: new Date()
+    });
+    
+    await admin.save();
+    
+    console.log(`✅ FIRST ADMIN CREATED: ${admin.email}`);
+    console.log(`⚠️  SECURITY: Consider disabling this endpoint now!`);
+    
+    res.json({
+      success: true,
+      message: 'Admin account created successfully',
+      admin: {
+        id: admin._id,
+        email: admin.email,
+        role: admin.role
+      },
+      warning: 'This endpoint should be disabled after first use for security'
+    });
+    
+  } catch (error) {
+    console.error('Admin creation error:', error);
+    res.status(500).json({ error: 'Failed to create admin account' });
+  }
+});
+
+// ========================================
 // Main API Routes
 // ========================================
 
