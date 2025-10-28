@@ -18,6 +18,29 @@ router.get('/venues', async (req, res) => {
   }
 });
 
+// POST create new venue - REAL DATABASE
+router.post('/venues/create', async (req, res) => {
+  try {
+    const venueData = req.body;
+    
+    // Create new venue
+    const newVenue = new Venue(venueData);
+    await newVenue.save();
+    
+    console.log(`✅ New venue created: ${newVenue.name}`);
+    
+    res.json({ 
+      success: true, 
+      message: 'Venue created successfully',
+      venue: newVenue 
+    });
+    
+  } catch (error) {
+    console.error('Error creating venue:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // GET single venue - REAL DATABASE
 router.get('/venues/:id', async (req, res) => {
   try {
