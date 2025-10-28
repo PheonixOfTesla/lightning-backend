@@ -229,7 +229,7 @@ router.post('/venue/deactivate', async (req, res) => {
   }
 });
 
-// GET venue stats - REAL DATABASE
+// GET venue stats - REAL DATABASE - FIXED
 router.get('/venue/:venueId/stats', async (req, res) => {
   try {
     const venue = await Venue.findById(req.params.venueId);
@@ -247,7 +247,15 @@ router.get('/venue/:venueId/stats', async (req, res) => {
     });
     
     const revenue = transactions.reduce((sum, t) => sum + t.venueRevenue, 0);
-    const passesSold = transactions.reduce((sum, t) => sum + (await Pass.findOne({ passId: t.passId }))?.quantity || 0, 0);
+    
+    // FIXED: Calculate passes sold correctly
+    let passesSold = 0;
+    for (const transaction of transactions) {
+      const pass = await Pass.findOne({ passId: transaction.passId });
+      if (pass) {
+        passesSold += pass.quantity || 0;
+      }
+    }
     
     res.json({
       revenue: Math.round(revenue),
