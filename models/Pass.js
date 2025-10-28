@@ -1,4 +1,3 @@
-// FIXED PASS MODEL - models/Pass.js
 const mongoose = require('mongoose');
 
 const passSchema = new mongoose.Schema({
