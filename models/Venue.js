@@ -19,6 +19,22 @@ const venueSchema = new mongoose.Schema({
   status: { type: String, enum: ['low', 'medium', 'high'], default: 'medium' },
   trending: { type: Boolean, default: false },
   ownerId: mongoose.Schema.Types.ObjectId,
+  
+  // NEW FIELDS FOR APPROVAL SYSTEM
+  approvalStatus: { 
+    type: String, 
+    enum: ['pending', 'approved', 'rejected'], 
+    default: 'pending' 
+  },
+  ownerEmail: { type: String },
+  ownerPhone: { type: String },
+  ownerName: { type: String },
+  appliedAt: { type: Date, default: Date.now },
+  approvedAt: { type: Date },
+  approvedBy: { type: String }, // Admin username who approved
+  rejectedAt: { type: Date },
+  rejectionReason: { type: String },
+  
   createdAt: { type: Date, default: Date.now }
 });
 
