@@ -8,11 +8,36 @@ const stripe = require('../integrations/stripe');
 const twilio = require('../integrations/twilio');
 const QRCode = require('../utils/qrCode');
 
-// GET all venues - REAL DATABASE
+// GET all venues - REAL DATABASE (with approval filtering)
 router.get('/venues', async (req, res) => {
   try {
-    const venues = await Venue.find({ isActive: true }).lean();
+    const { approvalStatus, includeAll } = req.query;
+    
+    let filter = {};
+    
+    // For admin panel, include all venues
+    if (includeAll === 'true') {
+      // No filter, return everything
+    }
+    // For customer app, only show approved and active venues
+    else {
+      filter = { 
+        isActive: true,
+        $or: [
+          { approvalStatus: 'approved' },
+          { approvalStatus: { $exists: false } } // Legacy venues without approval status
+        ]
+      };
+    }
+    
+    // Allow filtering by specific approval status
+    if (approvalStatus) {
+      filter.approvalStatus = approvalStatus;
+    }
+    
+    const venues = await Venue.find(filter).lean();
     res.json({ venues });
+    
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -27,16 +52,109 @@ router.post('/venues/create', async (req, res) => {
     const newVenue = new Venue(venueData);
     await newVenue.save();
     
-    console.log(`✅ New venue created: ${newVenue.name}`);
+    console.log(`✅ New venue created: ${newVenue.name} (Status: ${newVenue.approvalStatus || 'pending'})`);
+    
+    // TODO: Send email notification to admin if pending
+    // if (newVenue.approvalStatus === 'pending') {
+    //   await sendPendingNotificationToAdmin(newVenue);
+    // }
     
     res.json({ 
       success: true, 
-      message: 'Venue created successfully',
+      message: newVenue.approvalStatus === 'pending' 
+        ? 'Venue application submitted for review' 
+        : 'Venue created successfully',
       venue: newVenue 
     });
     
   } catch (error) {
     console.error('Error creating venue:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST approve/reject venue - NEW ENDPOINT
+router.post('/venue/approve', async (req, res) => {
+  try {
+    const { venueId, approvalStatus, rejectionReason } = req.body;
+    
+    if (!['approved', 'rejected'].includes(approvalStatus)) {
+      return res.status(400).json({ error: 'Invalid approval status' });
+    }
+    
+    const venue = await Venue.findById(venueId);
+    if (!venue) {
+      return res.status(404).json({ error: 'Venue not found' });
+    }
+    
+    venue.approvalStatus = approvalStatus;
+    
+    if (approvalStatus === 'approved') {
+      venue.approvedAt = new Date();
+      venue.approvedBy = req.userId || 'admin'; // If you have admin user system
+      
+      console.log(`✅ Venue APPROVED: ${venue.name}`);
+      
+      // TODO: Send approval email to venue owner with login credentials
+      // await sendApprovalEmail(venue);
+      
+    } else if (approvalStatus === 'rejected') {
+      venue.rejectedAt = new Date();
+      venue.rejectionReason = rejectionReason || 'Application did not meet requirements';
+      
+      console.log(`❌ Venue REJECTED: ${venue.name}`);
+      
+      // TODO: Send rejection email to venue owner
+      // await sendRejectionEmail(venue);
+    }
+    
+    await venue.save();
+    
+    res.json({ 
+      success: true, 
+      message: `Venue ${approvalStatus}`,
+      venue 
+    });
+    
+  } catch (error) {
+    console.error('Approval error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// DELETE venue - NEW ENDPOINT
+router.delete('/venues/:id', async (req, res) => {
+  try {
+    const venue = await Venue.findById(req.params.id);
+    
+    if (!venue) {
+      return res.status(404).json({ error: 'Venue not found' });
+    }
+    
+    // Optional: Check if venue has active passes before deleting
+    const activePasses = await Pass.countDocuments({ 
+      venueId: req.params.id, 
+      status: 'active' 
+    });
+    
+    if (activePasses > 0) {
+      return res.status(400).json({ 
+        error: `Cannot delete venue with ${activePasses} active passes. Please wait for passes to expire or contact support.`,
+        activePasses 
+      });
+    }
+    
+    await Venue.findByIdAndDelete(req.params.id);
+    
+    console.log(`🗑️ Venue DELETED: ${venue.name}`);
+    
+    res.json({ 
+      success: true, 
+      message: 'Venue deleted successfully' 
+    });
+    
+  } catch (error) {
+    console.error('Delete error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -63,6 +181,11 @@ router.post('/passes/purchase', async (req, res) => {
     const venue = await Venue.findById(venueId);
     if (!venue) {
       return res.status(404).json({ error: 'Venue not found' });
+    }
+    
+    // Check if venue is approved
+    if (venue.approvalStatus && venue.approvalStatus !== 'approved') {
+      return res.status(400).json({ error: 'Venue is not accepting passes at this time' });
     }
     
     if (!venue.isActive) {
