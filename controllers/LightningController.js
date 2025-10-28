@@ -121,20 +121,30 @@ router.post('/venue/approve', verifyToken, requireRole('admin'), async (req, res
     
     venue.approvalStatus = approvalStatus;
     
-    if (approvalStatus === 'approved') {
-      venue.approvedAt = new Date();
-      venue.approvedBy = req.userEmail || 'admin';
-      
-      console.log(`✅ Venue APPROVED: ${venue.name} by ${req.userEmail}`);
-      
-      // TODO: Send approval email to venue owner with login credentials
-      // await sendApprovalEmail(venue);
-      
-    } else if (approvalStatus === 'rejected') {
-      venue.rejectedAt = new Date();
-      venue.rejectionReason = rejectionReason || 'Application did not meet requirements';
-      
-      console.log(`❌ Venue REJECTED: ${venue.name} by ${req.userEmail}`);
+   if (approvalStatus === 'approved') {
+  venue.approvedAt = new Date();
+  venue.approvedBy = req.userEmail || 'admin';
+  
+  console.log(`✅ Venue APPROVED: ${venue.name} by ${req.userEmail}`);
+  
+  // Link the venue to its owner's user account
+  if (venue.ownerId) {
+    const User = require('../models/User');
+    await User.findByIdAndUpdate(venue.ownerId, {
+      venueId: venue._id,
+      role: 'venue'
+    });
+    console.log(`✅ User ${venue.ownerId} linked to approved venue ${venue._id}`);
+  }
+  
+  // TODO: Send approval email to venue owner with login credentials
+  // await sendApprovalEmail(venue);
+  
+} else if (approvalStatus === 'rejected') {
+  venue.rejectedAt = new Date();
+  venue.rejectionReason = rejectionReason || 'Application did not meet requirements';
+  
+  console.log(`❌ Venue REJECTED: ${venue.name} by ${req.userEmail}`);
       
       // TODO: Send rejection email to venue owner
       // await sendRejectionEmail(venue);
