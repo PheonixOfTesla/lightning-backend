@@ -79,19 +79,24 @@ router.post('/venues/create', verifyToken, async (req, res) => {
     const newVenue = new Venue(venueData);
     await newVenue.save();
     
-    console.log(`✅ New venue created: ${newVenue.name} (Status: ${newVenue.approvalStatus || 'pending'}) by ${req.userEmail}`);
+    // ✅ FIX: Update the user's venueId so they can access it
+    const User = require('../models/User');
+    await User.findByIdAndUpdate(req.userId, {
+      venueId: newVenue._id,
+      role: 'venue'  // Ensure they have venue role
+    });
     
-    // TODO: Send email notification to admin if pending
-    // if (newVenue.approvalStatus === 'pending') {
-    //   await sendPendingNotificationToAdmin(newVenue);
-    // }
+    console.log(`✅ New venue created: ${newVenue.name} (Status: ${newVenue.approvalStatus || 'pending'}) by ${req.userEmail}`);
+    console.log(`✅ User ${req.userEmail} linked to venue ${newVenue._id}`);
     
     res.json({ 
       success: true, 
       message: newVenue.approvalStatus === 'pending' 
         ? 'Venue application submitted for review' 
         : 'Venue created successfully',
-      venue: newVenue 
+      venue: newVenue,
+      // Return updated venueId so frontend can use it
+      venueId: newVenue._id.toString()
     });
     
   } catch (error) {
