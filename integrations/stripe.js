@@ -1,4 +1,4 @@
-const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY?.trim());
 
 async function createPaymentIntent(amount, email, venueConnectId = null) {
   const paymentData = {
