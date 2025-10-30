@@ -571,7 +571,7 @@ router.get('/venue/:venueId/stats', verifyToken, requireVenueOwnership, async (r
     const stats = await Transaction.aggregate([
       {
         $match: {
-          venueId: mongoose.Types.ObjectId(req.params.venueId),
+          venueId: new mongoose.Types.ObjectId(req.params.venueId),
           createdAt: { $gte: startOfDay }
         }
       },
