@@ -10,6 +10,18 @@ const QRCode = require('../utils/qrCode');
 const mongoose = require('mongoose');
 const { verifyToken, requireRole, requireVenueOwnership } = require('../middleware/auth');
 
+// Helper function to sanitize error messages (remove API keys)
+function sanitizeError(errorMessage) {
+  if (!errorMessage) return 'An error occurred';
+  // Remove any string that looks like an API key (sk_test_, pk_test_, sk_live_, pk_live_)
+  return errorMessage
+    .replace(/sk_test_[a-zA-Z0-9]+/g, 'sk_test_***')
+    .replace(/pk_test_[a-zA-Z0-9]+/g, 'pk_test_***')
+    .replace(/sk_live_[a-zA-Z0-9]+/g, 'sk_live_***')
+    .replace(/pk_live_[a-zA-Z0-9]+/g, 'pk_live_***')
+    .replace(/whsec_[a-zA-Z0-9]+/g, 'whsec_***');
+}
+
 // ==================== PUBLIC ROUTES (No auth required) ====================
 
 // GET config - Returns public configuration (Stripe publishable key)
@@ -19,7 +31,7 @@ router.get('/config', async (req, res) => {
       stripePublishableKey: process.env.STRIPE_PUBLISHABLE_KEY?.trim()
     });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: sanitizeError(error.message) });
   }
 });
 
@@ -54,7 +66,7 @@ router.get('/venues', async (req, res) => {
     res.json({ venues });
     
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: sanitizeError(error.message) });
   }
 });
 
@@ -67,7 +79,7 @@ router.get('/venues/:id', async (req, res) => {
     }
     res.json({ venue });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: sanitizeError(error.message) });
   }
 });
 
@@ -112,7 +124,7 @@ router.post('/venues/create', verifyToken, async (req, res) => {
     
   } catch (error) {
     console.error('Error creating venue:', error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: sanitizeError(error.message) });
   }
 });
 
@@ -171,7 +183,7 @@ router.post('/venue/approve', verifyToken, requireRole('admin'), async (req, res
     
   } catch (error) {
     console.error('Approval error:', error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: sanitizeError(error.message) });
   }
 });
 
@@ -208,7 +220,7 @@ router.delete('/venues/:id', verifyToken, requireRole('admin'), async (req, res)
     
   } catch (error) {
     console.error('Delete error:', error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: sanitizeError(error.message) });
   }
 });
 
@@ -281,7 +293,7 @@ router.post('/passes/create-payment', async (req, res) => {
     
   } catch (error) {
     console.error('Create payment error:', error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: sanitizeError(error.message) });
   }
 });
 
@@ -388,7 +400,7 @@ router.post('/passes/confirm-payment', async (req, res) => {
     
   } catch (error) {
     console.error('Confirm payment error:', error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: sanitizeError(error.message) });
   }
 });
 
@@ -456,7 +468,7 @@ router.get('/passes/:passId/validate', verifyToken, requireRole('venue', 'admin'
     res.json({ valid: true, pass });
     
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: sanitizeError(error.message) });
   }
 });
 
@@ -489,7 +501,7 @@ router.post('/passes/:passId/use', verifyToken, requireRole('venue', 'admin', 's
     res.json({ success: true, message: 'Pass used successfully' });
     
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: sanitizeError(error.message) });
   }
 });
 
@@ -516,7 +528,7 @@ router.put('/venue/pricing', verifyToken, requireVenueOwnership, async (req, res
     
     res.json({ success: true, newPrice });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: sanitizeError(error.message) });
   }
 });
 
@@ -542,7 +554,7 @@ router.post('/venue/activate', verifyToken, requireVenueOwnership, async (req, r
     
     res.json({ success: true, message: 'Passes activated' });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: sanitizeError(error.message) });
   }
 });
 
@@ -563,7 +575,7 @@ router.post('/venue/deactivate', verifyToken, requireVenueOwnership, async (req,
     
     res.json({ success: true, message: 'Passes deactivated' });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: sanitizeError(error.message) });
   }
 });
 
@@ -617,7 +629,7 @@ router.get('/venue/:venueId/stats', verifyToken, requireVenueOwnership, async (r
     
   } catch (error) {
     console.error('Stats error:', error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: sanitizeError(error.message) });
   }
 });
 
@@ -635,7 +647,7 @@ router.post('/notifications/push', verifyToken, requireVenueOwnership, async (re
     
     res.json({ success: true, sent: 0, message: 'Feature coming soon' });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: sanitizeError(error.message) });
   }
 });
 
@@ -661,7 +673,7 @@ router.get('/pricing/ml-suggest', async (req, res) => {
 
     res.json(suggestion);
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: sanitizeError(error.message) });
   }
 });
 
@@ -701,7 +713,7 @@ router.post('/venue/connect/create', verifyToken, requireVenueOwnership, async (
 
   } catch (error) {
     console.error('Connect account creation error:', error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: sanitizeError(error.message) });
   }
 });
 
@@ -743,7 +755,7 @@ router.post('/venue/payout', verifyToken, requireVenueOwnership, async (req, res
 
   } catch (error) {
     console.error('Payout error:', error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: sanitizeError(error.message) });
   }
 });
 
@@ -801,7 +813,7 @@ router.post('/admin/payout-all', verifyToken, requireRole('admin'), async (req, 
 
   } catch (error) {
     console.error('Bulk payout error:', error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: sanitizeError(error.message) });
   }
 });
 
@@ -822,7 +834,7 @@ router.get('/venue/:venueId/payout-info', verifyToken, requireVenueOwnership, as
     });
 
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: sanitizeError(error.message) });
   }
 });
 
