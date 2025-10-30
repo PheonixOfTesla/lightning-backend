@@ -12,6 +12,17 @@ const { verifyToken, requireRole, requireVenueOwnership } = require('../middlewa
 
 // ==================== PUBLIC ROUTES (No auth required) ====================
 
+// GET config - Returns public configuration (Stripe publishable key)
+router.get('/config', async (req, res) => {
+  try {
+    res.json({
+      stripePublishableKey: process.env.STRIPE_PUBLISHABLE_KEY
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // GET all venues - REAL DATABASE (with approval filtering)
 router.get('/venues', async (req, res) => {
   try {
