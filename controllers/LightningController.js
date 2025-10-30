@@ -349,9 +349,10 @@ router.post('/passes/confirm-payment', async (req, res) => {
     
     await transaction.save();
     
-    // Update venue
+    // Update venue and track pending payout
     venue.availablePasses -= parseInt(numPasses);
     venue.inLine += parseInt(numPasses);
+    venue.pendingPayout = (venue.pendingPayout || 0) + (parseFloat(amount) * 0.7); // Track 70% for venue
     await venue.save();
     
     console.log(`✅ Pass created after payment: ${passId} for ${venue.name}`);
@@ -627,23 +628,184 @@ router.post('/notifications/push', verifyToken, requireVenueOwnership, async (re
 router.get('/pricing/ml-suggest', async (req, res) => {
   try {
     const { venueId } = req.query;
-    
+
     if (!venueId) {
       return res.status(400).json({ error: 'Venue ID required' });
     }
-    
+
     const venue = await Venue.findById(venueId);
     if (!venue) {
       return res.status(404).json({ error: 'Venue not found' });
     }
-    
+
     const suggestion = LightningSauce.calculateOptimalPrice(
       venue,
       venue.waitTime,
       venue.capacity
     );
-    
+
     res.json(suggestion);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ==================== STRIPE CONNECT & PAYOUTS ====================
+
+// POST create Stripe Connect account for venue
+router.post('/venue/connect/create', verifyToken, requireVenueOwnership, async (req, res) => {
+  try {
+    const { venueId, email } = req.body;
+
+    const venue = await Venue.findById(venueId);
+    if (!venue) {
+      return res.status(404).json({ error: 'Venue not found' });
+    }
+
+    if (venue.stripeConnectId) {
+      return res.status(400).json({ error: 'Venue already has Stripe Connect account' });
+    }
+
+    const account = await stripe.createConnectAccount(email, venue.name);
+    venue.stripeConnectId = account.id;
+    await venue.save();
+
+    const accountLink = await stripe.createConnectAccountLink(
+      account.id,
+      `${process.env.FRONTEND_URL}/venue/connect/refresh`,
+      `${process.env.FRONTEND_URL}/venue/connect/return`
+    );
+
+    console.log(`✅ Stripe Connect created for ${venue.name}`);
+
+    res.json({
+      success: true,
+      accountId: account.id,
+      onboardingUrl: accountLink.url
+    });
+
+  } catch (error) {
+    console.error('Connect account creation error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST trigger payout for venue
+router.post('/venue/payout', verifyToken, requireVenueOwnership, async (req, res) => {
+  try {
+    const { venueId } = req.body;
+
+    const venue = await Venue.findById(venueId);
+    if (!venue) {
+      return res.status(404).json({ error: 'Venue not found' });
+    }
+
+    if (!venue.stripeConnectId) {
+      return res.status(400).json({ error: 'Venue must connect Stripe account first' });
+    }
+
+    if (venue.pendingPayout <= 0) {
+      return res.status(400).json({ error: 'No pending payout' });
+    }
+
+    // Create Stripe transfer
+    const transfer = await stripe.createPayout(venue.stripeConnectId, venue.pendingPayout);
+
+    // Update venue
+    const paidAmount = venue.pendingPayout;
+    venue.totalPaidOut = (venue.totalPaidOut || 0) + paidAmount;
+    venue.lastPayoutAt = new Date();
+    venue.pendingPayout = 0;
+    await venue.save();
+
+    console.log(`💸 Payout sent to ${venue.name}: $${paidAmount.toFixed(2)}`);
+
+    res.json({
+      success: true,
+      amountPaid: paidAmount,
+      transferId: transfer.id
+    });
+
+  } catch (error) {
+    console.error('Payout error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST trigger end-of-night payouts for ALL venues - ADMIN ONLY
+router.post('/admin/payout-all', verifyToken, requireRole('admin'), async (req, res) => {
+  try {
+    const venues = await Venue.find({
+      pendingPayout: { $gt: 0 },
+      stripeConnectId: { $exists: true, $ne: null }
+    });
+
+    const results = [];
+    let totalPaidOut = 0;
+
+    for (const venue of venues) {
+      try {
+        const transfer = await stripe.createPayout(venue.stripeConnectId, venue.pendingPayout);
+
+        const paidAmount = venue.pendingPayout;
+        venue.totalPaidOut = (venue.totalPaidOut || 0) + paidAmount;
+        venue.lastPayoutAt = new Date();
+        venue.pendingPayout = 0;
+        await venue.save();
+
+        totalPaidOut += paidAmount;
+
+        results.push({
+          venueId: venue._id,
+          venueName: venue.name,
+          amountPaid: paidAmount,
+          success: true
+        });
+
+        console.log(`💸 Payout sent to ${venue.name}: $${paidAmount.toFixed(2)}`);
+      } catch (error) {
+        results.push({
+          venueId: venue._id,
+          venueName: venue.name,
+          error: error.message,
+          success: false
+        });
+        console.error(`❌ Payout failed for ${venue.name}:`, error.message);
+      }
+    }
+
+    console.log(`✅ End-of-night payouts completed: ${results.filter(r => r.success).length}/${venues.length} venues, $${totalPaidOut.toFixed(2)} total`);
+
+    res.json({
+      success: true,
+      venuesPaid: results.filter(r => r.success).length,
+      totalVenues: venues.length,
+      totalPaidOut,
+      results
+    });
+
+  } catch (error) {
+    console.error('Bulk payout error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// GET venue payout info
+router.get('/venue/:venueId/payout-info', verifyToken, requireVenueOwnership, async (req, res) => {
+  try {
+    const venue = await Venue.findById(req.params.venueId);
+    if (!venue) {
+      return res.status(404).json({ error: 'Venue not found' });
+    }
+
+    res.json({
+      pendingPayout: venue.pendingPayout || 0,
+      totalPaidOut: venue.totalPaidOut || 0,
+      lastPayoutAt: venue.lastPayoutAt,
+      hasStripeConnect: !!venue.stripeConnectId,
+      stripeConnectId: venue.stripeConnectId
+    });
+
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

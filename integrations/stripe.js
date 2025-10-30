@@ -27,11 +27,47 @@ async function processRefund(chargeId) {
   return await stripe.refunds.create({ payment_intent: chargeId });
 }
 
-module.exports = { 
-  createPaymentIntent, 
+// STRIPE CONNECT & PAYOUT FUNCTIONS
+async function createConnectAccount(email, businessName) {
+  return await stripe.accounts.create({
+    type: 'express',
+    country: 'US',
+    email,
+    business_type: 'company',
+    company: { name: businessName },
+    capabilities: {
+      card_payments: { requested: true },
+      transfers: { requested: true }
+    }
+  });
+}
+
+async function createConnectAccountLink(accountId, refreshUrl, returnUrl) {
+  return await stripe.accountLinks.create({
+    account: accountId,
+    refresh_url: refreshUrl,
+    return_url: returnUrl,
+    type: 'account_onboarding'
+  });
+}
+
+async function createPayout(connectAccountId, amount) {
+  return await stripe.transfers.create({
+    amount: Math.round(amount * 100),
+    currency: 'usd',
+    destination: connectAccountId,
+    description: 'End of night payout - Lightning Pass'
+  });
+}
+
+module.exports = {
+  createPaymentIntent,
   updatePaymentIntent,
   retrievePaymentIntent,
-  createCustomer, 
+  createCustomer,
   processRefund,
+  createConnectAccount,
+  createConnectAccountLink,
+  createPayout,
   webhooks: stripe.webhooks  // Export for webhook verification
 };

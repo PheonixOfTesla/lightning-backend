@@ -34,7 +34,15 @@ const venueSchema = new mongoose.Schema({
   approvedBy: { type: String }, // Admin username who approved
   rejectedAt: { type: Date },
   rejectionReason: { type: String },
-  
+
+  // STRIPE CONNECT & PAYOUT FIELDS
+  stripeConnectId: String,
+  pendingPayout: { type: Number, default: 0 },
+  totalPaidOut: { type: Number, default: 0 },
+  lastPayoutAt: Date,
+  bankAccountLast4: String,
+  payoutSchedule: { type: String, enum: ['daily', 'end_of_night'], default: 'end_of_night' },
+
   createdAt: { type: Date, default: Date.now }
 });
 
