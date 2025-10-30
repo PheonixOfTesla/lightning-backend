@@ -10,20 +10,26 @@ const passSchema = new mongoose.Schema({
   purchasePrice: { type: Number, required: true },
   quantity: { type: Number, default: 1 },
   amount: { type: Number, required: true },
-  status: { 
-    type: String, 
-    enum: ['active', 'used', 'expired', 'cancelled'], 
+  status: {
+    type: String,
+    enum: ['active', 'used', 'expired', 'cancelled'],
     default: 'active',
-    index: true 
+    index: true
   },
   qrCode: { type: String, required: true },
   validUntil: { type: Date, required: true, index: true },
   usedAt: Date,
   usedBy: String,  // Email of scanner who marked it used
-  
+
+  // Pass Template Reference
+  templateId: { type: mongoose.Schema.Types.ObjectId, ref: 'PassTemplate' },
+  passName: { type: String },  // e.g., "VIP Unlimited Drinks"
+  passDescription: { type: String },
+  tagline: { type: String },  // e.g., "DJ ESCO at 9pm - Enjoy the night!"
+
   // Payment tracking for idempotency
   stripePaymentIntentId: { type: String, unique: true, sparse: true, index: true },
-  
+
   // Metadata
   createdAt: { type: Date, default: Date.now, index: true },
   updatedAt: { type: Date, default: Date.now }

@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const Venue = require('../models/Venue');
 const Pass = require('../models/Pass');
+const PassTemplate = require('../models/PassTemplate');
 const Transaction = require('../models/Transaction');
 const LightningSauce = require('../core/Lightning-Sauce');
 const stripe = require('../integrations/stripe');
@@ -229,39 +230,59 @@ router.delete('/venues/:id', verifyToken, requireRole('admin'), async (req, res)
 // STEP 1: Create payment intent (DON'T create pass yet!)
 router.post('/passes/create-payment', async (req, res) => {
   try {
-    const { venueId, email, phone, numPasses } = req.body;
-    
+    const { venueId, email, phone, numPasses, templateId } = req.body;
+
     // Validate input
     if (!venueId || !email || !phone || !numPasses) {
       return res.status(400).json({ error: 'Missing required fields' });
     }
-    
+
     if (numPasses < 1 || numPasses > 10) {
       return res.status(400).json({ error: 'Invalid number of passes (1-10)' });
     }
-    
+
     // Get venue
     const venue = await Venue.findById(venueId);
     if (!venue) {
       return res.status(404).json({ error: 'Venue not found' });
     }
-    
+
     // Check venue is approved and active
     if (venue.approvalStatus && venue.approvalStatus !== 'approved') {
       return res.status(400).json({ error: 'Venue is not accepting passes at this time' });
     }
-    
+
     if (!venue.isActive) {
       return res.status(400).json({ error: 'Venue passes not active' });
     }
-    
+
     // Check availability
     if (venue.availablePasses < numPasses) {
       return res.status(400).json({ error: 'Not enough passes available' });
     }
-    
+
+    // Get pass template if provided, otherwise use venue's current price
+    let price = venue.currentPrice;
+    let passName = 'General Admission';
+    let passDescription = '';
+    let tagline = '';
+
+    if (templateId) {
+      const template = await PassTemplate.findById(templateId);
+      if (!template) {
+        return res.status(404).json({ error: 'Pass template not found' });
+      }
+      if (!template.isActive) {
+        return res.status(400).json({ error: 'This pass type is not available' });
+      }
+      price = template.price;
+      passName = template.name;
+      passDescription = template.description || '';
+      tagline = template.tagline || '';
+    }
+
     // Calculate amount
-    const amount = venue.currentPrice * numPasses;
+    const amount = price * numPasses;
     const amountCents = Math.round(amount * 100);
 
     // Create payment intent with automatic split if venue has Stripe Connect
@@ -270,7 +291,7 @@ router.post('/passes/create-payment', async (req, res) => {
       email,
       venue.stripeConnectId  // Automatically splits 85% to venue, 15% to platform
     );
-    
+
     // Store payment intent metadata for later
     await stripe.updatePaymentIntent(paymentIntent.id, {
       metadata: {
@@ -279,18 +300,22 @@ router.post('/passes/create-payment', async (req, res) => {
         email,
         phone,
         numPasses: numPasses.toString(),
-        amount: amount.toString()
+        amount: amount.toString(),
+        templateId: templateId || '',
+        passName,
+        passDescription,
+        tagline
       }
     });
-    
-    console.log(`💳 Payment intent created: ${paymentIntent.id} for ${venue.name}`);
-    
+
+    console.log(`💳 Payment intent created: ${paymentIntent.id} for ${venue.name} - ${passName} x${numPasses}`);
+
     res.json({
       success: true,
       clientSecret: paymentIntent.client_secret,
       paymentIntentId: paymentIntent.id
     });
-    
+
   } catch (error) {
     console.error('Create payment error:', error);
     res.status(500).json({ error: sanitizeError(error.message) });
@@ -345,32 +370,46 @@ router.post('/passes/confirm-payment', async (req, res) => {
     }
     
     // Get metadata
-    const { venueId, venueName, numPasses, amount } = paymentIntent.metadata;
-    
+    const {
+      venueId,
+      venueName,
+      numPasses,
+      amount,
+      templateId,
+      passName,
+      passDescription,
+      tagline
+    } = paymentIntent.metadata;
+
     // Get venue
     const venue = await Venue.findById(venueId);
     if (!venue) {
       return res.status(404).json({ error: 'Venue not found' });
     }
-    
-    // Generate pass
+
+    // Generate pass with unique ID
     const passId = `LP-${Date.now()}-${Math.random().toString(36).substr(2, 9).toUpperCase()}`;
     const qrCodeData = await QRCode.generate(passId);
-    
-    // Create pass
+
+    // Create pass with template information
     const newPass = new Pass({
       passId,
       venueId: venue._id,
       venueName: venue.name,
       email,
       phone,
-      purchasePrice: venue.currentPrice,
+      purchasePrice: parseFloat(amount) / parseInt(numPasses),
       quantity: parseInt(numPasses),
       amount: parseFloat(amount),
       qrCode: qrCodeData,
       status: 'active',
       validUntil: new Date(Date.now() + 24 * 60 * 60 * 1000),
-      stripePaymentIntentId: paymentIntentId
+      stripePaymentIntentId: paymentIntentId,
+      // Template information
+      templateId: templateId || null,
+      passName: passName || 'General Admission',
+      passDescription: passDescription || '',
+      tagline: tagline || ''
     });
     
     await newPass.save();
@@ -849,6 +888,138 @@ router.get('/venue/:venueId/payout-info', verifyToken, requireVenueOwnership, as
     });
 
   } catch (error) {
+    res.status(500).json({ error: sanitizeError(error.message) });
+  }
+});
+
+// ==================== PASS TEMPLATES ====================
+
+// POST create pass template - VENUE OWNER or ADMIN
+router.post('/venue/:venueId/pass-templates', verifyToken, requireVenueOwnership, async (req, res) => {
+  try {
+    const { name, description, price, tagline, features } = req.body;
+    const { venueId } = req.params;
+
+    if (!name || !price) {
+      return res.status(400).json({ error: 'Name and price are required' });
+    }
+
+    const venue = await Venue.findById(venueId);
+    if (!venue) {
+      return res.status(404).json({ error: 'Venue not found' });
+    }
+
+    const passTemplate = new PassTemplate({
+      venueId: venue._id,
+      venueName: venue.name,
+      name,
+      description,
+      price,
+      tagline,
+      features: features || [],
+      isActive: true
+    });
+
+    await passTemplate.save();
+
+    console.log(`✅ Pass template created: ${name} for ${venue.name} ($${price})`);
+
+    res.json({
+      success: true,
+      template: passTemplate
+    });
+
+  } catch (error) {
+    console.error('Create pass template error:', error);
+    res.status(500).json({ error: sanitizeError(error.message) });
+  }
+});
+
+// GET all pass templates for a venue - VENUE OWNER or ADMIN
+router.get('/venue/:venueId/pass-templates', verifyToken, requireVenueOwnership, async (req, res) => {
+  try {
+    const templates = await PassTemplate.find({ venueId: req.params.venueId }).sort({ createdAt: -1 });
+
+    res.json({
+      success: true,
+      templates
+    });
+
+  } catch (error) {
+    res.status(500).json({ error: sanitizeError(error.message) });
+  }
+});
+
+// GET public pass templates for a venue (for customer purchase)
+router.get('/venues/:venueId/pass-templates', async (req, res) => {
+  try {
+    const templates = await PassTemplate.find({
+      venueId: req.params.venueId,
+      isActive: true
+    }).sort({ price: 1 });
+
+    res.json({
+      success: true,
+      templates
+    });
+
+  } catch (error) {
+    res.status(500).json({ error: sanitizeError(error.message) });
+  }
+});
+
+// PUT update pass template - VENUE OWNER or ADMIN
+router.put('/venue/:venueId/pass-templates/:templateId', verifyToken, requireVenueOwnership, async (req, res) => {
+  try {
+    const { name, description, price, tagline, features, isActive } = req.body;
+    const { templateId } = req.params;
+
+    const template = await PassTemplate.findById(templateId);
+    if (!template) {
+      return res.status(404).json({ error: 'Template not found' });
+    }
+
+    if (name) template.name = name;
+    if (description !== undefined) template.description = description;
+    if (price) template.price = price;
+    if (tagline !== undefined) template.tagline = tagline;
+    if (features !== undefined) template.features = features;
+    if (isActive !== undefined) template.isActive = isActive;
+
+    await template.save();
+
+    console.log(`✅ Pass template updated: ${template.name}`);
+
+    res.json({
+      success: true,
+      template
+    });
+
+  } catch (error) {
+    console.error('Update pass template error:', error);
+    res.status(500).json({ error: sanitizeError(error.message) });
+  }
+});
+
+// DELETE pass template - VENUE OWNER or ADMIN
+router.delete('/venue/:venueId/pass-templates/:templateId', verifyToken, requireVenueOwnership, async (req, res) => {
+  try {
+    const { templateId } = req.params;
+
+    const template = await PassTemplate.findByIdAndDelete(templateId);
+    if (!template) {
+      return res.status(404).json({ error: 'Template not found' });
+    }
+
+    console.log(`✅ Pass template deleted: ${template.name}`);
+
+    res.json({
+      success: true,
+      message: 'Template deleted'
+    });
+
+  } catch (error) {
+    console.error('Delete pass template error:', error);
     res.status(500).json({ error: sanitizeError(error.message) });
   }
 });
