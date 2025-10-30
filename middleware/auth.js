@@ -165,12 +165,36 @@ async function register(req, res) {
     });
     
     await user.save();
-    
+
+    // If registering as venue owner, create pending venue application
+    if (role === 'venue') {
+      const Venue = require('../models/Venue');
+
+      const venue = new Venue({
+        name: req.body.venueName,
+        type: req.body.venueType,
+        address: req.body.venueAddress,
+        ownerId: user._id,
+        ownerEmail: user.email,
+        ownerPhone: user.phone,
+        approvalStatus: 'pending',  // Requires admin approval
+        isActive: false  // Not active until approved
+      });
+
+      await venue.save();
+
+      // Link venue to user
+      user.venueId = venue._id;
+      await user.save();
+
+      console.log(`✅ Venue application created: ${venue.name} (${user.email}) - PENDING APPROVAL`);
+    }
+
     // Generate token
     const token = generateToken(user);
-    
+
     console.log(`✅ User registered: ${user.email} (${user.role})`);
-    
+
     res.json({
       success: true,
       token,
@@ -179,7 +203,8 @@ async function register(req, res) {
         email: user.email,
         phone: user.phone,
         role: user.role,
-        venueId: user.venueId
+        venueId: user.venueId,
+        venuePending: role === 'venue' ? true : false  // Flag for pending venue approval
       }
     });
     
