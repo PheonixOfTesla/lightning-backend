@@ -86,6 +86,24 @@ router.get('/venues/:id', async (req, res) => {
 
 // ==================== PROTECTED ROUTES (Auth required) ====================
 
+// GET venues by owner - Returns all venues owned by authenticated user
+router.get('/venues/by-owner', verifyToken, requireRole('venue', 'admin'), async (req, res) => {
+  try {
+    const venues = await Venue.find({ ownerId: req.userId }).sort({ createdAt: -1 });
+
+    console.log(`📋 Loaded ${venues.length} venues for owner ${req.userEmail}`);
+
+    res.json({
+      success: true,
+      venues
+    });
+
+  } catch (error) {
+    console.error('Error loading owner venues:', error);
+    res.status(500).json({ error: sanitizeError(error.message) });
+  }
+});
+
 // POST create new venue - REAL DATABASE (REQUIRES AUTH)
 router.post('/venues/create', verifyToken, async (req, res) => {
   try {
@@ -102,16 +120,22 @@ router.post('/venues/create', verifyToken, async (req, res) => {
     // Create new venue
     const newVenue = new Venue(venueData);
     await newVenue.save();
-    
-    // ✅ FIX: Update the user's venueId so they can access it
+
+    // Update the user's venueId only if they don't have one yet (first venue)
     const User = require('../models/User');
-    await User.findByIdAndUpdate(req.userId, {
-      venueId: newVenue._id,
-      role: 'venue'  // Ensure they have venue role
-    });
-    
+    const user = await User.findById(req.userId);
+
+    if (!user.venueId) {
+      await User.findByIdAndUpdate(req.userId, {
+        venueId: newVenue._id,
+        role: 'venue'  // Ensure they have venue role
+      });
+      console.log(`✅ User ${req.userEmail} linked to first venue ${newVenue._id}`);
+    } else {
+      console.log(`✅ Additional venue created for ${req.userEmail} (Total venues: ${await Venue.countDocuments({ ownerId: req.userId })})`);
+    }
+
     console.log(`✅ New venue created: ${newVenue.name} (Status: ${newVenue.approvalStatus || 'pending'}) by ${req.userEmail}`);
-    console.log(`✅ User ${req.userEmail} linked to venue ${newVenue._id}`);
     
     res.json({ 
       success: true, 
