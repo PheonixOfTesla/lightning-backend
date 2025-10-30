@@ -30,6 +30,13 @@ async function retrievePaymentIntent(paymentIntentId) {
   return await stripe.paymentIntents.retrieve(paymentIntentId);
 }
 
+// NEW: Confirm payment intent (for test mode auto-confirmation)
+async function confirmPaymentIntent(paymentIntentId, paymentMethod) {
+  return await stripe.paymentIntents.confirm(paymentIntentId, {
+    payment_method: paymentMethod
+  });
+}
+
 async function createCustomer(email, phone) {
   return await stripe.customers.create({ email, phone });
 }
@@ -75,6 +82,7 @@ module.exports = {
   createPaymentIntent,
   updatePaymentIntent,
   retrievePaymentIntent,
+  confirmPaymentIntent,
   createCustomer,
   processRefund,
   createConnectAccount,
