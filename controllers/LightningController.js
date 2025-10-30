@@ -240,9 +240,13 @@ router.post('/passes/create-payment', async (req, res) => {
     // Calculate amount
     const amount = venue.currentPrice * numPasses;
     const amountCents = Math.round(amount * 100);
-    
-    // Create payment intent (but DON'T create pass yet!)
-    const paymentIntent = await stripe.createPaymentIntent(amountCents, email);
+
+    // Create payment intent with automatic split if venue has Stripe Connect
+    const paymentIntent = await stripe.createPaymentIntent(
+      amountCents,
+      email,
+      venue.stripeConnectId  // Automatically splits 85% to venue, 15% to platform
+    );
     
     // Store payment intent metadata for later
     await stripe.updatePaymentIntent(paymentIntent.id, {
@@ -341,8 +345,8 @@ router.post('/passes/confirm-payment', async (req, res) => {
       email,
       phone,
       amount: parseFloat(amount),
-      venueRevenue: parseFloat(amount) * 0.7,
-      platformFee: parseFloat(amount) * 0.3,
+      venueRevenue: parseFloat(amount) * 0.85,
+      platformFee: parseFloat(amount) * 0.15,
       stripeChargeId: paymentIntentId,
       status: 'completed'
     });
@@ -352,7 +356,7 @@ router.post('/passes/confirm-payment', async (req, res) => {
     // Update venue and track pending payout
     venue.availablePasses -= parseInt(numPasses);
     venue.inLine += parseInt(numPasses);
-    venue.pendingPayout = (venue.pendingPayout || 0) + (parseFloat(amount) * 0.7); // Track 70% for venue
+    venue.pendingPayout = (venue.pendingPayout || 0) + (parseFloat(amount) * 0.85); // Track 85% for venue
     await venue.save();
     
     console.log(`✅ Pass created after payment: ${passId} for ${venue.name}`);

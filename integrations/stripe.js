@@ -1,12 +1,23 @@
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 
-async function createPaymentIntent(amount, email) {
-  return await stripe.paymentIntents.create({
+async function createPaymentIntent(amount, email, venueConnectId = null) {
+  const paymentData = {
     amount,
     currency: 'usd',
     receipt_email: email,
     metadata: { platform: 'lightning-pass' }
-  });
+  };
+
+  // If venue has Stripe Connect, automatically split payment
+  if (venueConnectId) {
+    const platformFee = Math.round(amount * 0.15); // 15% platform fee
+    paymentData.application_fee_amount = platformFee;
+    paymentData.transfer_data = {
+      destination: venueConnectId  // 85% goes directly to venue
+    };
+  }
+
+  return await stripe.paymentIntents.create(paymentData);
 }
 
 // NEW: Update payment intent with metadata
