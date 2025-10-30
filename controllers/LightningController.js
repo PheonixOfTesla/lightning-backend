@@ -16,7 +16,7 @@ const { verifyToken, requireRole, requireVenueOwnership } = require('../middlewa
 router.get('/config', async (req, res) => {
   try {
     res.json({
-      stripePublishableKey: process.env.STRIPE_PUBLISHABLE_KEY
+      stripePublishableKey: process.env.STRIPE_PUBLISHABLE_KEY?.trim()
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
