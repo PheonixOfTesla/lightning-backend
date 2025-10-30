@@ -118,6 +118,7 @@ async function login(req, res) {
       user: {
         id: user._id,
         email: user.email,
+        phone: user.phone,
         role: user.role,
         venueId: user.venueId
       }
@@ -157,6 +158,7 @@ async function register(req, res) {
     // Create user
     const user = new User({
       email: email.toLowerCase(),
+      phone: req.body.phone,
       passwordHash,
       role: role || 'customer',
       venueId: role === 'venue' ? venueId : undefined
@@ -175,6 +177,7 @@ async function register(req, res) {
       user: {
         id: user._id,
         email: user.email,
+        phone: user.phone,
         role: user.role,
         venueId: user.venueId
       }
