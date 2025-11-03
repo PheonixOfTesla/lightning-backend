@@ -31,7 +31,7 @@ const passSchema = new mongoose.Schema({
   },
   refundedAt: Date,
   refundedBy: String,  // Email of who issued refund
-  stripeRefundId: String
+  stripeRefundId: String,
 
   // Pass Template Reference
   templateId: { type: mongoose.Schema.Types.ObjectId, ref: 'PassTemplate' },
