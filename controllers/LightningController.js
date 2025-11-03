@@ -522,6 +522,53 @@ router.post('/webhooks/stripe', express.raw({ type: 'application/json' }), async
   res.json({ received: true });
 });
 
+// ==================== PUBLIC PASS ROUTES ====================
+
+// GET pass QR code - PUBLIC (for MMS and web viewing)
+router.get('/passes/:passId/qr', async (req, res) => {
+  try {
+    const pass = await Pass.findOne({ passId: req.params.passId });
+
+    if (!pass) {
+      return res.status(404).json({ error: 'Pass not found' });
+    }
+
+    // Return QR code as base64 data URL
+    res.json({
+      qrCode: pass.qrCode,
+      passId: pass.passId,
+      venueName: pass.venueName,
+      status: pass.status,
+      validUntil: pass.validUntil
+    });
+
+  } catch (error) {
+    res.status(500).json({ error: sanitizeError(error.message) });
+  }
+});
+
+// GET pass QR code image - PUBLIC (direct image for MMS)
+router.get('/passes/:passId/qr-image', async (req, res) => {
+  try {
+    const pass = await Pass.findOne({ passId: req.params.passId });
+
+    if (!pass) {
+      return res.status(404).send('Pass not found');
+    }
+
+    // Convert data URL to buffer and send as PNG
+    const base64Data = pass.qrCode.replace(/^data:image\/png;base64,/, '');
+    const imgBuffer = Buffer.from(base64Data, 'base64');
+
+    res.set('Content-Type', 'image/png');
+    res.set('Cache-Control', 'public, max-age=3600'); // Cache for 1 hour
+    res.send(imgBuffer);
+
+  } catch (error) {
+    res.status(500).send('Error generating QR code');
+  }
+});
+
 // ==================== PASS VALIDATION & USAGE (Scanner Routes) ====================
 
 // GET validate pass - SCANNER ONLY (REQUIRES AUTH)
