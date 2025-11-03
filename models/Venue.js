@@ -37,8 +37,9 @@ const venueSchema = new mongoose.Schema({
 
   // STRIPE CONNECT & PAYOUT FIELDS
   stripeConnectId: String,
-  pendingPayout: { type: Number, default: 0 },
-  totalPaidOut: { type: Number, default: 0 },
+  lifetimeRevenue: { type: Number, default: 0 },  // Total revenue earned (for reporting only - money auto-sent via destination charges)
+  pendingPayout: { type: Number, default: 0 },  // DEPRECATED: kept for backward compatibility
+  totalPaidOut: { type: Number, default: 0 },  // Track total paid out via Stripe Connect
   lastPayoutAt: Date,
   bankAccountLast4: String,
   payoutSchedule: { type: String, enum: ['daily', 'end_of_night'], default: 'end_of_night' },

@@ -45,6 +45,27 @@ async function processRefund(chargeId) {
   return await stripe.refunds.create({ payment_intent: chargeId });
 }
 
+// NEW: Create refund with proper destination charge handling
+async function createRefund(paymentIntentId, amount = null, reason = 'requested_by_customer') {
+  const refundData = {
+    payment_intent: paymentIntentId,
+    reason: reason,
+    reverse_transfer: true  // CRITICAL: Reverses the 85/15 split for destination charges
+  };
+
+  // If amount specified, refund partial amount (otherwise full refund)
+  if (amount) {
+    refundData.amount = Math.round(amount * 100);
+  }
+
+  return await stripe.refunds.create(refundData);
+}
+
+// NEW: Get Stripe Connect account status
+async function getConnectAccountStatus(accountId) {
+  return await stripe.accounts.retrieve(accountId);
+}
+
 // STRIPE CONNECT & PAYOUT FUNCTIONS
 async function createConnectAccount(email, businessName) {
   return await stripe.accounts.create({
@@ -85,6 +106,8 @@ module.exports = {
   confirmPaymentIntent,
   createCustomer,
   processRefund,
+  createRefund,
+  getConnectAccountStatus,
   createConnectAccount,
   createConnectAccountLink,
   createPayout,

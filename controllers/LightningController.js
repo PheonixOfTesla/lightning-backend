@@ -454,10 +454,10 @@ router.post('/passes/confirm-payment', async (req, res) => {
     
     await transaction.save();
     
-    // Update venue and track pending payout
+    // Update venue and track lifetime revenue
     venue.availablePasses -= parseInt(numPasses);
     venue.inLine += parseInt(numPasses);
-    venue.pendingPayout = (venue.pendingPayout || 0) + (parseFloat(amount) * 0.85); // Track 85% for venue
+    venue.lifetimeRevenue = (venue.lifetimeRevenue || 0) + (parseFloat(amount) * 0.85); // Track 85% for reporting (money auto-sent via Stripe destination charges)
     await venue.save();
     
     console.log(`✅ Pass created after payment: ${passId} for ${venue.name}`);
@@ -795,107 +795,7 @@ router.post('/venue/connect/create', verifyToken, requireVenueOwnership, async (
   }
 });
 
-// POST trigger payout for venue
-router.post('/venue/payout', verifyToken, requireVenueOwnership, async (req, res) => {
-  try {
-    const { venueId } = req.body;
-
-    const venue = await Venue.findById(venueId);
-    if (!venue) {
-      return res.status(404).json({ error: 'Venue not found' });
-    }
-
-    if (!venue.stripeConnectId) {
-      return res.status(400).json({ error: 'Venue must connect Stripe account first' });
-    }
-
-    if (venue.pendingPayout <= 0) {
-      return res.status(400).json({ error: 'No pending payout' });
-    }
-
-    // Create Stripe transfer
-    const transfer = await stripe.createPayout(venue.stripeConnectId, venue.pendingPayout);
-
-    // Update venue
-    const paidAmount = venue.pendingPayout;
-    venue.totalPaidOut = (venue.totalPaidOut || 0) + paidAmount;
-    venue.lastPayoutAt = new Date();
-    venue.pendingPayout = 0;
-    await venue.save();
-
-    console.log(`💸 Payout sent to ${venue.name}: $${paidAmount.toFixed(2)}`);
-
-    res.json({
-      success: true,
-      amountPaid: paidAmount,
-      transferId: transfer.id
-    });
-
-  } catch (error) {
-    console.error('Payout error:', error);
-    res.status(500).json({ error: sanitizeError(error.message) });
-  }
-});
-
-// POST trigger end-of-night payouts for ALL venues - ADMIN ONLY
-router.post('/admin/payout-all', verifyToken, requireRole('admin'), async (req, res) => {
-  try {
-    const venues = await Venue.find({
-      pendingPayout: { $gt: 0 },
-      stripeConnectId: { $exists: true, $ne: null }
-    });
-
-    const results = [];
-    let totalPaidOut = 0;
-
-    for (const venue of venues) {
-      try {
-        const transfer = await stripe.createPayout(venue.stripeConnectId, venue.pendingPayout);
-
-        const paidAmount = venue.pendingPayout;
-        venue.totalPaidOut = (venue.totalPaidOut || 0) + paidAmount;
-        venue.lastPayoutAt = new Date();
-        venue.pendingPayout = 0;
-        await venue.save();
-
-        totalPaidOut += paidAmount;
-
-        results.push({
-          venueId: venue._id,
-          venueName: venue.name,
-          amountPaid: paidAmount,
-          success: true
-        });
-
-        console.log(`💸 Payout sent to ${venue.name}: $${paidAmount.toFixed(2)}`);
-      } catch (error) {
-        results.push({
-          venueId: venue._id,
-          venueName: venue.name,
-          error: error.message,
-          success: false
-        });
-        console.error(`❌ Payout failed for ${venue.name}:`, error.message);
-      }
-    }
-
-    console.log(`✅ End-of-night payouts completed: ${results.filter(r => r.success).length}/${venues.length} venues, $${totalPaidOut.toFixed(2)} total`);
-
-    res.json({
-      success: true,
-      venuesPaid: results.filter(r => r.success).length,
-      totalVenues: venues.length,
-      totalPaidOut,
-      results
-    });
-
-  } catch (error) {
-    console.error('Bulk payout error:', error);
-    res.status(500).json({ error: sanitizeError(error.message) });
-  }
-});
-
-// GET venue payout info
+// GET venue revenue info (updated - no manual payouts)
 router.get('/venue/:venueId/payout-info', verifyToken, requireVenueOwnership, async (req, res) => {
   try {
     const venue = await Venue.findById(req.params.venueId);
@@ -904,11 +804,15 @@ router.get('/venue/:venueId/payout-info', verifyToken, requireVenueOwnership, as
     }
 
     res.json({
-      pendingPayout: venue.pendingPayout || 0,
+      lifetimeRevenue: venue.lifetimeRevenue || 0,
       totalPaidOut: venue.totalPaidOut || 0,
       lastPayoutAt: venue.lastPayoutAt,
       hasStripeConnect: !!venue.stripeConnectId,
-      stripeConnectId: venue.stripeConnectId
+      stripeConnectId: venue.stripeConnectId,
+      autoPayoutsEnabled: !!venue.stripeConnectId,
+      message: venue.stripeConnectId
+        ? 'Payments automatically sent to your Stripe account after each sale (85% to you, 15% platform fee)'
+        : 'Connect your Stripe account to receive automatic payouts'
     });
 
   } catch (error) {
@@ -1044,6 +948,388 @@ router.delete('/venue/:venueId/pass-templates/:templateId', verifyToken, require
 
   } catch (error) {
     console.error('Delete pass template error:', error);
+    res.status(500).json({ error: sanitizeError(error.message) });
+  }
+});
+
+// ==================== REFUND SYSTEM ====================
+
+const RefundRequest = require('../models/RefundRequest');
+
+// GET customer's passes - CUSTOMER ONLY
+router.get('/customer/passes', verifyToken, requireRole('customer'), async (req, res) => {
+  try {
+    const passes = await Pass.find({
+      email: req.userEmail
+    }).sort({ createdAt: -1 });
+
+    res.json({
+      success: true,
+      passes
+    });
+
+  } catch (error) {
+    console.error('Error loading customer passes:', error);
+    res.status(500).json({ error: sanitizeError(error.message) });
+  }
+});
+
+// POST request refund - CUSTOMER ONLY
+router.post('/passes/:passId/request-refund', verifyToken, requireRole('customer'), async (req, res) => {
+  try {
+    const { reason } = req.body;
+    const { passId } = req.params;
+
+    if (!reason || reason.length < 10) {
+      return res.status(400).json({ error: 'Please provide a detailed reason (at least 10 characters)' });
+    }
+
+    // Get the pass
+    const pass = await Pass.findOne({ passId });
+    if (!pass) {
+      return res.status(404).json({ error: 'Pass not found' });
+    }
+
+    // Verify customer owns this pass
+    if (pass.email !== req.userEmail) {
+      return res.status(403).json({ error: 'This pass does not belong to you' });
+    }
+
+    // Check if pass is eligible for refund
+    if (pass.status === 'refunded') {
+      return res.status(400).json({ error: 'This pass has already been refunded' });
+    }
+
+    if (pass.status === 'used') {
+      return res.status(400).json({ error: 'Cannot refund a pass that has been used' });
+    }
+
+    if (pass.refundRequested) {
+      return res.status(400).json({ error: 'Refund already requested for this pass' });
+    }
+
+    // Create refund request
+    const refundRequest = new RefundRequest({
+      passId: pass.passId,
+      customerId: req.userId,
+      venueId: pass.venueId,
+      customerEmail: pass.email,
+      customerPhone: pass.phone,
+      customerReason: reason,
+      status: 'pending',
+      refundAmount: pass.amount
+    });
+
+    await refundRequest.save();
+
+    // Update pass
+    pass.refundRequested = true;
+    pass.refundRequestedAt = new Date();
+    pass.refundStatus = 'pending';
+    await pass.save();
+
+    console.log(`📝 Refund requested: ${pass.passId} by ${req.userEmail}`);
+
+    res.json({
+      success: true,
+      message: 'Refund request submitted successfully',
+      refundRequest
+    });
+
+  } catch (error) {
+    console.error('Request refund error:', error);
+    res.status(500).json({ error: sanitizeError(error.message) });
+  }
+});
+
+// GET customer's refund requests - CUSTOMER ONLY
+router.get('/customer/refund-requests', verifyToken, requireRole('customer'), async (req, res) => {
+  try {
+    const requests = await RefundRequest.find({
+      customerEmail: req.userEmail
+    }).sort({ requestedAt: -1 });
+
+    res.json({
+      success: true,
+      requests
+    });
+
+  } catch (error) {
+    console.error('Error loading refund requests:', error);
+    res.status(500).json({ error: sanitizeError(error.message) });
+  }
+});
+
+// GET venue's refund requests - VENUE OWNER or ADMIN
+router.get('/venue/:venueId/refund-requests', verifyToken, requireVenueOwnership, async (req, res) => {
+  try {
+    const { status } = req.query;
+    const filter = { venueId: req.params.venueId };
+
+    if (status && status !== 'all') {
+      filter.status = status;
+    }
+
+    const requests = await RefundRequest.find(filter).sort({ requestedAt: -1 });
+
+    res.json({
+      success: true,
+      requests
+    });
+
+  } catch (error) {
+    console.error('Error loading venue refund requests:', error);
+    res.status(500).json({ error: sanitizeError(error.message) });
+  }
+});
+
+// POST respond to refund request (approve/deny) - VENUE OWNER or ADMIN
+router.post('/venue/:venueId/refund-requests/:requestId/respond', verifyToken, requireVenueOwnership, async (req, res) => {
+  try {
+    const { action, denialReason } = req.body;
+    const { requestId, venueId } = req.params;
+
+    if (!['approve', 'deny'].includes(action)) {
+      return res.status(400).json({ error: 'Action must be "approve" or "deny"' });
+    }
+
+    if (action === 'deny' && !denialReason) {
+      return res.status(400).json({ error: 'Denial reason is required' });
+    }
+
+    // Get refund request
+    const refundRequest = await RefundRequest.findById(requestId);
+    if (!refundRequest) {
+      return res.status(404).json({ error: 'Refund request not found' });
+    }
+
+    if (refundRequest.status !== 'pending') {
+      return res.status(400).json({ error: 'Refund request has already been processed' });
+    }
+
+    // Get the pass
+    const pass = await Pass.findOne({ passId: refundRequest.passId });
+    if (!pass) {
+      return res.status(404).json({ error: 'Pass not found' });
+    }
+
+    if (action === 'approve') {
+      // Create Stripe refund
+      const refund = await stripe.createRefund(
+        pass.stripePaymentIntentId,
+        null,
+        'requested_by_customer'
+      );
+
+      // Update refund request
+      refundRequest.status = 'approved';
+      refundRequest.respondedAt = new Date();
+      refundRequest.respondedBy = req.userEmail;
+      refundRequest.stripeRefundId = refund.id;
+      await refundRequest.save();
+
+      // Update pass
+      pass.status = 'refunded';
+      pass.refundStatus = 'approved';
+      pass.refundedAt = new Date();
+      pass.refundedBy = req.userEmail;
+      pass.stripeRefundId = refund.id;
+      await pass.save();
+
+      // Update transaction
+      await Transaction.updateOne(
+        { passId: pass.passId },
+        { status: 'refunded' }
+      );
+
+      // Update venue revenue
+      const venue = await Venue.findById(venueId);
+      if (venue) {
+        venue.lifetimeRevenue = Math.max(0, (venue.lifetimeRevenue || 0) - (pass.amount * 0.85));
+        await venue.save();
+      }
+
+      // Send SMS notification
+      try {
+        await twilio.sendSMS(
+          pass.phone,
+          `✅ Your refund for ${pass.passName || 'General Admission'} at ${pass.venueName} has been APPROVED. $${pass.amount.toFixed(2)} will be returned to your card within 5-10 business days. - Lightning Pass`
+        );
+      } catch (smsError) {
+        console.error('SMS send failed:', smsError);
+      }
+
+      console.log(`✅ Refund APPROVED: ${pass.passId} by ${req.userEmail}`);
+
+      res.json({
+        success: true,
+        message: 'Refund approved and processed',
+        refund
+      });
+
+    } else {
+      // Deny refund
+      refundRequest.status = 'denied';
+      refundRequest.respondedAt = new Date();
+      refundRequest.respondedBy = req.userEmail;
+      refundRequest.denialReason = denialReason;
+      await refundRequest.save();
+
+      // Update pass
+      pass.refundRequested = false;
+      pass.refundStatus = 'denied';
+      await pass.save();
+
+      // Send SMS notification
+      try {
+        await twilio.sendSMS(
+          pass.phone,
+          `❌ Your refund request for ${pass.passName || 'General Admission'} at ${pass.venueName} has been DENIED. Reason: ${denialReason} - Lightning Pass`
+        );
+      } catch (smsError) {
+        console.error('SMS send failed:', smsError);
+      }
+
+      console.log(`❌ Refund DENIED: ${pass.passId} by ${req.userEmail}`);
+
+      res.json({
+        success: true,
+        message: 'Refund request denied'
+      });
+    }
+
+  } catch (error) {
+    console.error('Respond to refund error:', error);
+    res.status(500).json({ error: sanitizeError(error.message) });
+  }
+});
+
+// GET search passes - VENUE OWNER or ADMIN
+router.get('/venue/:venueId/passes/search', verifyToken, requireVenueOwnership, async (req, res) => {
+  try {
+    const { q } = req.query;
+    const { venueId } = req.params;
+
+    if (!q || q.length < 3) {
+      return res.status(400).json({ error: 'Search query must be at least 3 characters' });
+    }
+
+    // Search by email, phone, or passId
+    const searchQuery = {
+      venueId: venueId,
+      $or: [
+        { email: { $regex: q, $options: 'i' } },
+        { phone: { $regex: q.replace(/[^0-9+]/g, ''), $options: 'i' } },
+        { passId: q.toUpperCase() }
+      ]
+    };
+
+    const passes = await Pass.find(searchQuery).sort({ createdAt: -1 }).limit(20);
+
+    res.json({
+      success: true,
+      passes,
+      count: passes.length
+    });
+
+  } catch (error) {
+    console.error('Search passes error:', error);
+    res.status(500).json({ error: sanitizeError(error.message) });
+  }
+});
+
+// POST venue-initiated refund - VENUE OWNER or ADMIN
+router.post('/venue/:venueId/passes/:passId/refund', verifyToken, requireVenueOwnership, async (req, res) => {
+  try {
+    const { reason, notifyCustomer } = req.body;
+    const { passId, venueId } = req.params;
+
+    if (!reason) {
+      return res.status(400).json({ error: 'Reason for refund is required' });
+    }
+
+    // Get the pass
+    const pass = await Pass.findOne({ passId });
+    if (!pass) {
+      return res.status(404).json({ error: 'Pass not found' });
+    }
+
+    // Verify venue owns this pass
+    if (pass.venueId.toString() !== venueId) {
+      return res.status(403).json({ error: 'This pass does not belong to your venue' });
+    }
+
+    // Check if already refunded
+    if (pass.status === 'refunded') {
+      return res.status(400).json({ error: 'This pass has already been refunded' });
+    }
+
+    // Create Stripe refund
+    const refund = await stripe.createRefund(
+      pass.stripePaymentIntentId,
+      null,
+      'requested_by_merchant'
+    );
+
+    // Create refund request record (for tracking)
+    const refundRequest = new RefundRequest({
+      passId: pass.passId,
+      customerId: pass.userId,
+      venueId: pass.venueId,
+      customerEmail: pass.email,
+      customerPhone: pass.phone,
+      customerReason: 'Venue-initiated refund: ' + reason,
+      status: 'approved',
+      refundAmount: pass.amount,
+      respondedAt: new Date(),
+      respondedBy: req.userEmail,
+      stripeRefundId: refund.id
+    });
+    await refundRequest.save();
+
+    // Update pass
+    pass.status = 'refunded';
+    pass.refundStatus = 'venue_refunded';
+    pass.refundedAt = new Date();
+    pass.refundedBy = req.userEmail;
+    pass.stripeRefundId = refund.id;
+    await pass.save();
+
+    // Update transaction
+    await Transaction.updateOne(
+      { passId: pass.passId },
+      { status: 'refunded' }
+    );
+
+    // Update venue revenue
+    const venue = await Venue.findById(venueId);
+    if (venue) {
+      venue.lifetimeRevenue = Math.max(0, (venue.lifetimeRevenue || 0) - (pass.amount * 0.85));
+      await venue.save();
+    }
+
+    // Send SMS notification if requested
+    if (notifyCustomer !== false) {
+      try {
+        await twilio.sendSMS(
+          pass.phone,
+          `💸 A refund of $${pass.amount.toFixed(2)} has been issued for your pass at ${pass.venueName}. The money will be returned to your card within 5-10 business days. - Lightning Pass`
+        );
+      } catch (smsError) {
+        console.error('SMS send failed:', smsError);
+      }
+    }
+
+    console.log(`💸 Venue-initiated refund: ${pass.passId} by ${req.userEmail}`);
+
+    res.json({
+      success: true,
+      message: 'Refund issued successfully',
+      refund
+    });
+
+  } catch (error) {
+    console.error('Venue refund error:', error);
     res.status(500).json({ error: sanitizeError(error.message) });
   }
 });

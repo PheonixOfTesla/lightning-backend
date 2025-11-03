@@ -12,7 +12,7 @@ const passSchema = new mongoose.Schema({
   amount: { type: Number, required: true },
   status: {
     type: String,
-    enum: ['active', 'used', 'expired', 'cancelled'],
+    enum: ['active', 'used', 'expired', 'cancelled', 'refunded'],
     default: 'active',
     index: true
   },
@@ -20,6 +20,18 @@ const passSchema = new mongoose.Schema({
   validUntil: { type: Date, required: true, index: true },
   usedAt: Date,
   usedBy: String,  // Email of scanner who marked it used
+
+  // Refund tracking
+  refundRequested: { type: Boolean, default: false },
+  refundRequestedAt: Date,
+  refundStatus: {
+    type: String,
+    enum: ['none', 'pending', 'approved', 'denied', 'venue_refunded'],
+    default: 'none'
+  },
+  refundedAt: Date,
+  refundedBy: String,  // Email of who issued refund
+  stripeRefundId: String
 
   // Pass Template Reference
   templateId: { type: mongoose.Schema.Types.ObjectId, ref: 'PassTemplate' },
