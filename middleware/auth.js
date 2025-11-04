@@ -109,9 +109,17 @@ async function login(req, res) {
     
     // Generate token
     const token = generateToken(user);
-    
+
+    // Check if venue is still pending approval
+    let venuePending = false;
+    if (user.role === 'venue' && user.venueId) {
+      const Venue = require('../models/Venue');
+      const venue = await Venue.findById(user.venueId);
+      venuePending = venue && venue.approvalStatus === 'pending';
+    }
+
     console.log(`✅ User logged in: ${user.email} (${user.role})`);
-    
+
     res.json({
       success: true,
       token,
@@ -120,7 +128,8 @@ async function login(req, res) {
         email: user.email,
         phone: user.phone,
         role: user.role,
-        venueId: user.venueId
+        venueId: user.venueId,
+        venuePending: venuePending
       }
     });
     
