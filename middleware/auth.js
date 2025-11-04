@@ -170,7 +170,8 @@ async function register(req, res) {
       phone: req.body.phone,
       passwordHash,
       role: role || 'customer',
-      venueId: role === 'venue' ? venueId : undefined
+      venueId: role === 'venue' ? venueId : undefined,
+      wantsPromotions: req.body.wantsPromotions || false
     });
     
     await user.save();

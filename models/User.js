@@ -9,6 +9,7 @@ const userSchema = new mongoose.Schema({
   totalSpent: { type: Number, default: 0 },
   passesUsed: { type: Number, default: 0 },
   favoriteVenues: [mongoose.Schema.Types.ObjectId],
+  wantsPromotions: { type: Boolean, default: false },  // Opt-in for promotional discounts
   createdAt: { type: Date, default: Date.now }
 });
 

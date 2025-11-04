@@ -313,8 +313,27 @@ router.post('/passes/create-payment', async (req, res) => {
       tagline = template.tagline || '';
     }
 
-    // Calculate amount
-    const amount = price * numPasses;
+    // Check for promotional discount
+    let discountPercent = 0;
+    let originalAmount = price * numPasses;
+    let amount = originalAmount;
+
+    const User = require('../models/User');
+    const user = await User.findOne({ email: email.toLowerCase() });
+
+    if (user && user.wantsPromotions) {
+      // Get system settings for promotional discount
+      const SystemSettings = require('../models/SystemSettings');
+      const settings = await SystemSettings.findById('system');
+
+      if (settings && settings.promotionalDiscountPercent > 0) {
+        discountPercent = settings.promotionalDiscountPercent;
+        const discountAmount = originalAmount * (discountPercent / 100);
+        amount = originalAmount - discountAmount;
+        console.log(`🎁 Promotional discount applied: ${discountPercent}% off ($${originalAmount.toFixed(2)} → $${amount.toFixed(2)}) for ${email}`);
+      }
+    }
+
     const amountCents = Math.round(amount * 100);
 
     // Create payment intent with automatic split if venue has Stripe Connect
@@ -333,6 +352,8 @@ router.post('/passes/create-payment', async (req, res) => {
         phone,
         numPasses: numPasses.toString(),
         amount: amount.toString(),
+        originalAmount: originalAmount.toString(),
+        discountPercent: discountPercent.toString(),
         templateId: templateId || '',
         passName,
         passDescription,
@@ -1394,6 +1415,63 @@ router.post('/venue/:venueId/passes/:passId/refund', verifyToken, requireVenueOw
   } catch (error) {
     console.error('Venue refund error:', error);
     res.status(500).json({ error: sanitizeError(error.message) });
+  }
+});
+
+// ===== SYSTEM SETTINGS =====
+// Get promotional discount percentage
+router.get('/system/settings', verifyToken, requireRole('admin'), async (req, res) => {
+  try {
+    const SystemSettings = require('../models/SystemSettings');
+
+    let settings = await SystemSettings.findById('system');
+    if (!settings) {
+      // Create default settings if they don't exist
+      settings = new SystemSettings({ _id: 'system' });
+      await settings.save();
+    }
+
+    res.json({
+      promotionalDiscountPercent: settings.promotionalDiscountPercent || 0,
+      updatedAt: settings.updatedAt,
+      updatedBy: settings.updatedBy
+    });
+  } catch (error) {
+    console.error('Get settings error:', error);
+    res.status(500).json({ error: 'Failed to load settings' });
+  }
+});
+
+// Update promotional discount percentage (admin only)
+router.put('/system/settings', verifyToken, requireRole('admin'), async (req, res) => {
+  try {
+    const { promotionalDiscountPercent } = req.body;
+
+    if (promotionalDiscountPercent === undefined || promotionalDiscountPercent < 0 || promotionalDiscountPercent > 100) {
+      return res.status(400).json({ error: 'Discount must be between 0 and 100' });
+    }
+
+    const SystemSettings = require('../models/SystemSettings');
+
+    let settings = await SystemSettings.findById('system');
+    if (!settings) {
+      settings = new SystemSettings({ _id: 'system' });
+    }
+
+    settings.promotionalDiscountPercent = promotionalDiscountPercent;
+    settings.updatedBy = req.userEmail;
+    await settings.save();
+
+    console.log(`✅ Promotional discount updated to ${promotionalDiscountPercent}% by ${req.userEmail}`);
+
+    res.json({
+      success: true,
+      promotionalDiscountPercent: settings.promotionalDiscountPercent,
+      message: `Promotional discount set to ${promotionalDiscountPercent}%`
+    });
+  } catch (error) {
+    console.error('Update settings error:', error);
+    res.status(500).json({ error: 'Failed to update settings' });
   }
 });
 
