@@ -280,6 +280,14 @@ router.post('/passes/create-payment', async (req, res) => {
       return res.status(400).json({ error: 'Venue passes not active' });
     }
 
+    // REQUIRE STRIPE CONNECT BEFORE ALLOWING PURCHASES
+    if (!venue.stripeConnectId) {
+      return res.status(403).json({
+        error: 'This venue has not connected their bank account yet. Passes cannot be purchased at this time.',
+        code: 'VENUE_BANK_NOT_CONNECTED'
+      });
+    }
+
     // Check availability
     if (venue.availablePasses < numPasses) {
       return res.status(400).json({ error: 'Not enough passes available' });
@@ -882,6 +890,14 @@ router.post('/venue/:venueId/pass-templates', verifyToken, requireVenueOwnership
     const venue = await Venue.findById(venueId);
     if (!venue) {
       return res.status(404).json({ error: 'Venue not found' });
+    }
+
+    // REQUIRE STRIPE CONNECT BEFORE CREATING PASSES
+    if (!venue.stripeConnectId) {
+      return res.status(403).json({
+        error: 'Please connect your bank account via Stripe Connect before creating passes',
+        code: 'BANK_ACCOUNT_REQUIRED'
+      });
     }
 
     const passTemplate = new PassTemplate({
